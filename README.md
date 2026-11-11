@@ -1,5 +1,8 @@
 # StockSync Frontend
 
+![CI](https://github.com/gopichand-retail-apps/stocksync-frontend/actions/workflows/ci.yml/badge.svg)
+**Live demo:** https://stocksync-frontend-sand.vercel.app/
+
 [Architecture guide](docs/architecture.md) — source map, workflows, contracts, data, security, and checks.
 
 ## Repository layout and Windows workflow
