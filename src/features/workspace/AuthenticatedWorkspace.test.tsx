@@ -144,7 +144,7 @@ describe('AuthenticatedWorkspace', () => {
   it('keeps auditors read-only and submits a receipt for managers', async () => {
     prepareApi();
     const receipt = vi.spyOn(api, 'receiveStock').mockResolvedValue({
-      id: '682163f7-b8d3-4e18-8944-df558e3e9ab2',
+      id: entry.id,
       locationId: 'loc-central',
       skuId: 'sku-coffee',
       quantity: 3,
@@ -167,14 +167,39 @@ describe('AuthenticatedWorkspace', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Receive stock' }));
 
     await waitFor(() =>
-      expect(receipt).toHaveBeenCalledWith({
-        locationId: 'loc-central',
-        skuId: 'sku-coffee',
-        quantity: 3,
-        note: undefined,
-      }),
+      expect(receipt).toHaveBeenCalledWith(
+        { locationId: 'loc-central', skuId: 'sku-coffee', quantity: 3, note: undefined },
+        { idempotencyKey: expect.any(String), signal: expect.any(AbortSignal) },
+      ),
     );
-    expect(await screen.findByText('Stock receipt recorded. On-hand quantity is updated.')).toBeInTheDocument();
+    expect(await screen.findByText('Recorded: 3 units at Central Market.')).toBeInTheDocument();
+    await user.click(screen.getByRole('link', { name: 'View stock movement' }));
+    expect(document.getElementById(`movement-${entry.id}`)).toHaveFocus();
+  });
+
+  it.each(['Cancel', 'Sign out'])('starts a fresh receipt after %s', async (control) => {
+    prepareApi();
+    const receive = vi.spyOn(api, 'receiveStock').mockRejectedValue(new TypeError('Network failure'));
+    const logout = vi.spyOn(api, 'logout').mockResolvedValue();
+    const user = userEvent.setup();
+    const workspace = renderWorkspace(users.inventory_manager);
+    const submitReceipt = async () => {
+      await user.click(await screen.findByRole('button', { name: 'Receive stock' }));
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByRole('button', { name: 'Receive stock' }));
+      expect(await within(dialog).findByText('Awaiting confirmation')).toBeInTheDocument();
+    };
+
+    await submitReceipt();
+    await user.click(screen.getByRole('button', { name: control }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    if (control === 'Sign out') {
+      await waitFor(() => expect(logout).toHaveBeenCalledOnce());
+      workspace.unmount();
+      renderWorkspace(users.inventory_manager);
+    }
+    await submitReceipt();
+    expect(receive.mock.calls[1]?.[1].idempotencyKey).not.toBe(receive.mock.calls[0]?.[1].idempotencyKey);
   });
 
   it.each([

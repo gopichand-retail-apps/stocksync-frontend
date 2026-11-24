@@ -522,6 +522,11 @@ button:disabled { cursor: not-allowed; opacity: 0.55; transform: none; }
 .dialog-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; place-items: center; color: #203b34; background: #e6f1e7; border-radius: 8px; }
 .dialog-close { margin: -4px -4px 0 0; }
 .operation-form { display: grid; gap: 13px; }
+.operation-fields { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
+.receipt-recovery { padding: 10px; color: #674618; background: #fff5df; border-radius: 6px; font-size: 12px; line-height: 1.5; }
+.receipt-recovery p { margin: 4px 0 0; }
+.receipt-ledger-link { display: inline-block; margin-inline-start: 8px; color: inherit; text-decoration: underline; }
+.operation-form button[aria-disabled="true"] { opacity: 0.6; cursor: wait; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
 .form-field { min-width: 0; }
 .form-field label { display: block; margin-bottom: 6px; color: #172620; font-size: 9px; font-weight: 750; }

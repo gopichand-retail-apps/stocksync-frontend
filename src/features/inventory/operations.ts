@@ -3,13 +3,6 @@ import type { StockOperation } from './types';
 
 export async function executeStockOperation(operation: StockOperation): Promise<unknown> {
   switch (operation.type) {
-    case 'receive':
-      return api.receiveStock({
-        locationId: operation.locationId,
-        skuId: operation.skuId,
-        quantity: operation.quantity,
-        note: operation.note,
-      });
     case 'transfer':
       return api.createTransfer({
         fromLocationId: operation.fromLocationId,
@@ -48,8 +41,6 @@ export async function executeStockOperation(operation: StockOperation): Promise<
 
 export function getOperationNotice(operation: StockOperation, translate: (key: string) => string): string {
   switch (operation.type) {
-    case 'receive':
-      return translate('notice.receive');
     case 'transfer':
       return translate('notice.transfer');
     case 'count':

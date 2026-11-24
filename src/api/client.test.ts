@@ -286,7 +286,14 @@ describe('StockSync API contracts', () => {
       );
     vi.stubGlobal('fetch', fetchMock);
 
-    await api.receiveStock({ locationId: 'loc-central', skuId: 'sku-coffee', quantity: 3 });
+    const receiptSignal = new AbortController().signal;
+    await api.receiveStock(
+      { locationId: 'loc-central', skuId: 'sku-coffee', quantity: 3 },
+      { idempotencyKey: 'receipt-intent-key', signal: receiptSignal },
+    );
+    const receiptRequest = fetchMock.mock.calls[0]?.[1];
+    expect(new Headers(receiptRequest?.headers).get('Idempotency-Key')).toBe('receipt-intent-key');
+    expect(receiptRequest?.signal).toBe(receiptSignal);
     await api.createTransfer({
       fromLocationId: 'loc-central',
       toLocationId: 'loc-north',

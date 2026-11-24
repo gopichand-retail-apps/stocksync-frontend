@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowDownToLine, ArrowLeftRight, Boxes, ClipboardCheck, PackageCheck, X, type LucideIcon } from 'lucide-react';
-import type { InventoryItem, Location } from '../../api/client';
+import type { InventoryItem, Location, ReceiptResult } from '../../api/client';
 import { useContent } from '../../content-context';
 import type { StockActionKind, StockOperation } from './types';
 import {
@@ -11,6 +11,7 @@ import {
   QuantityField,
   StockContext,
 } from './OperationFields';
+import { useReceiptConfirmation } from './useReceiptConfirmation';
 
 const actionDetailKeys: Record<StockActionKind, string> = {
   receive: 'receive',
@@ -31,6 +32,7 @@ type OperationDialogProps = {
   error: string | null;
   onClose: () => void;
   onSubmit: (operation: StockOperation) => void;
+  onReceiptRecorded: (receipt: ReceiptResult) => void;
 };
 
 const actionIcons: Record<StockActionKind, LucideIcon> = {
@@ -46,6 +48,47 @@ function captureActiveElement(): HTMLElement | null {
   return document.activeElement instanceof HTMLElement ? document.activeElement : null;
 }
 
+function OperationFooter({
+  action,
+  hasSelectedItem,
+  isAwaiting,
+  isPending,
+  isSubmittingReceipt,
+  toLocationId,
+  onClose,
+}: {
+  action: StockActionKind;
+  hasSelectedItem: boolean;
+  isAwaiting: boolean;
+  isPending: boolean;
+  isSubmittingReceipt: boolean;
+  toLocationId: string;
+  onClose: () => void;
+}) {
+  const { t } = useContent();
+  const submitKey =
+    isPending || isSubmittingReceipt
+      ? 'operation.submitting'
+      : isAwaiting
+        ? 'operation.receipt.retry'
+        : `operation.action.${action}.title`;
+  return (
+    <footer className="dialog-footer">
+      <button className="button-secondary" onClick={onClose} type="button">
+        {t('operation.cancel')}
+      </button>
+      <button
+        aria-disabled={isSubmittingReceipt || undefined}
+        className="button-primary"
+        disabled={isPending || !hasSelectedItem || (action === 'transfer' && !toLocationId)}
+        type="submit"
+      >
+        {t(submitKey)}
+      </button>
+    </footer>
+  );
+}
+
 export function OperationDialog({
   action,
   locations,
@@ -57,8 +100,10 @@ export function OperationDialog({
   error,
   onClose,
   onSubmit,
+  onReceiptRecorded,
 }: OperationDialogProps) {
   const { t } = useContent();
+  const receipt = useReceiptConfirmation(onReceiptRecorded);
   const [locationId, setLocationId] = useState(defaultLocationId);
   const [fromLocationId, setFromLocationId] = useState(defaultLocationId);
   const [toLocationId, setToLocationId] = useState(
@@ -87,11 +132,12 @@ export function OperationDialog({
         return;
       }
       if (event.key !== 'Tab') return;
-      const focusable = dialog.querySelectorAll<HTMLElement>(
+      const controls = dialog.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
       );
-      const first = focusable.item(0);
-      const last = focusable.item(focusable.length - 1);
+      const focusable = Array.from(controls).filter((control) => !control.closest('fieldset[disabled]'));
+      const first = focusable[0];
+      const last = focusable.at(-1);
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last?.focus();
@@ -125,7 +171,7 @@ export function OperationDialog({
     if (!selectedItem) return;
     switch (action) {
       case 'receive':
-        onSubmit({ type: 'receive', locationId, skuId, quantity: amount, note: submittedNote || undefined });
+        void receipt.submit({ locationId, skuId, quantity: amount, note: submittedNote || undefined });
         break;
       case 'transfer':
         onSubmit({
@@ -192,41 +238,46 @@ export function OperationDialog({
             <X size={17} aria-hidden="true" />
           </button>
         </header>
-        <form className="operation-form" onSubmit={handleSubmit}>
-          <OperationLocationFields
+        <form className="operation-form" onSubmit={handleSubmit} onChangeCapture={receipt.resetIntent}>
+          <fieldset className="operation-form operation-fields" disabled={receipt.isSubmitting}>
+            <OperationLocationFields
+              action={action}
+              fromLocationId={fromLocationId}
+              locations={locations}
+              locationId={locationId}
+              onFromLocationChange={changeFromLocation}
+              onLocationChange={setLocationId}
+              onToLocationChange={setToLocationId}
+              toLocationId={toLocationId}
+            />
+            <ProductField products={products} onSkuChange={setSkuId} selectedItem={selectedItem} skuId={skuId} />
+            <StockContext action={action} selectedItem={selectedItem} />
+            <QuantityField
+              action={action}
+              countKey={countKey}
+              countedQuantity={countedQuantity}
+              onCountChange={setCountDraft}
+              onQuantityChange={setQuantity}
+              quantity={quantity}
+            />
+            <NoteField action={action} note={note} onNoteChange={setNote} />
+          </fieldset>
+          {receipt.isUnconfirmed && (
+            <div className="receipt-recovery" role="status">
+              <strong>{t('operation.receipt.awaiting')}</strong>
+              <p>{t('operation.receipt.recovery')}</p>
+            </div>
+          )}
+          <OperationFeedback error={receipt.error ?? error} isLoadingItems={isLoadingItems} products={products} />
+          <OperationFooter
             action={action}
-            fromLocationId={fromLocationId}
-            locations={locations}
-            locationId={locationId}
-            onFromLocationChange={changeFromLocation}
-            onLocationChange={setLocationId}
-            onToLocationChange={setToLocationId}
+            hasSelectedItem={Boolean(selectedItem)}
+            isAwaiting={receipt.isUnconfirmed}
+            isPending={isPending}
+            isSubmittingReceipt={receipt.isSubmitting}
+            onClose={onClose}
             toLocationId={toLocationId}
           />
-          <ProductField products={products} onSkuChange={setSkuId} selectedItem={selectedItem} skuId={skuId} />
-          <StockContext action={action} selectedItem={selectedItem} />
-          <QuantityField
-            action={action}
-            countKey={countKey}
-            countedQuantity={countedQuantity}
-            onCountChange={setCountDraft}
-            onQuantityChange={setQuantity}
-            quantity={quantity}
-          />
-          <NoteField action={action} note={note} onNoteChange={setNote} />
-          <OperationFeedback error={error} isLoadingItems={isLoadingItems} products={products} />
-          <footer className="dialog-footer">
-            <button className="button-secondary" onClick={onClose} type="button">
-              {t('operation.cancel')}
-            </button>
-            <button
-              className="button-primary"
-              disabled={isPending || !selectedItem || (action === 'transfer' && !toLocationId)}
-              type="submit"
-            >
-              {isPending ? t('operation.submitting') : t(`operation.action.${actionKey}.title`)}
-            </button>
-          </footer>
         </form>
       </section>
     </div>

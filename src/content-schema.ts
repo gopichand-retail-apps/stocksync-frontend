@@ -1,11 +1,26 @@
 import { z } from 'zod';
 
+const receiptMessageKeys = [
+  'operation.receipt.awaiting',
+  'operation.receipt.recovery',
+  'operation.receipt.retry',
+  'operation.receipt.rejected',
+  'operation.receipt.recorded',
+  'operation.receipt.selectedLocation',
+  'operation.receipt.viewMovement',
+];
+
 export const contentModelSchema = z
   .object({
     version: z.literal(1),
     appId: z.string().min(1),
     locale: z.string().min(2),
-    messages: z.record(z.string(), z.string()),
+    messages: z
+      .record(z.string(), z.string())
+      .refine(
+        (messages) => receiptMessageKeys.every((key) => Boolean(messages[key]?.trim())),
+        'Receipt messages are required',
+      ),
     data: z.record(z.string(), z.unknown()),
   })
   .strict();

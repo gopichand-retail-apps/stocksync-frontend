@@ -157,6 +157,24 @@ sequenceDiagram
 
 Invalid authorization or schema input is rejected before the stock transaction. A transaction failure rolls back the balance, ledger row, and idempotency record together; replayed commands do not publish a second stock event.
 
+### STK-01 receipt intent and recovery
+
+The open receipt form creates an opaque UUID at the first submit. It passes that key to
+`POST /api/v1/receipts` alongside the existing CSRF token and a new `X-Request-ID` per attempt.
+Only one receipt attempt can be active per form. Each has a 15-second response deadline.
+An ambiguous result (network failure, timeout, unreadable reply, or server failure) leaves
+the form and its key available for an explicit retry. A definitive client rejection is
+displayed using the content model's error copy. A rejection on a later attempt does not
+resolve a prior ambiguous attempt.
+
+Only a validated API result produces the **Recorded** notice and its link to the movement
+ID. The notice, retry instructions and accessible labels come from `stocksync-model.json`.
+An edit to SKU, location, quantity, or note clears the previous key. Closing the form,
+signing out, switching actor, reloading, or confirming the receipt ends that recovery
+window. There is no receipt key in browser storage. Aborting an HTTP attempt only ends
+the client's wait. Check the ledger before entering the delivery again after closing
+an unconfirmed receipt.
+
 ## 6. Domain, persistence, and data ownership
 
 The frontend consumes server-owned domain records; its model supplies presentation and synthetic display content. Local UI state cannot replace backend transaction or authorization decisions.

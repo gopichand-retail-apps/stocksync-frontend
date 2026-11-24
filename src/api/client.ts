@@ -203,27 +203,31 @@ export type LedgerEntry = z.infer<typeof LedgerEntrySchema>;
 export type Overview = z.infer<typeof OverviewSchema>;
 export type Transfer = z.infer<typeof TransferSchema>;
 export type Reservation = z.infer<typeof ReservationSchema>;
+export type ReceiptInput = { locationId: string; skuId: string; quantity: number; note?: string };
+export type ReceiptResult = z.infer<typeof MutationResultSchema>;
 
 export class ApiClientError extends Error {
   readonly code: string;
   readonly requestId?: string;
+  readonly httpStatus?: number;
 
-  constructor(message: string, code: string, requestId?: string) {
+  constructor(message: string, code: string, requestId?: string, httpStatus?: number) {
     super(message);
     this.name = 'ApiClientError';
     this.code = code;
     this.requestId = requestId;
+    this.httpStatus = httpStatus;
   }
 }
 
 let csrfToken: string | null = null;
 
-function requestHeaders(method: string, body: string | undefined): Headers {
+function requestHeaders(method: string, body: string | undefined, idempotencyKey?: string): Headers {
   const headers = new Headers({ Accept: 'application/json', 'X-Request-ID': crypto.randomUUID() });
   if (body !== undefined) headers.set('Content-Type', 'application/json');
   if (method !== 'GET') {
     if (csrfToken) headers.set('X-CSRF-Token', csrfToken);
-    headers.set('Idempotency-Key', crypto.randomUUID());
+    headers.set('Idempotency-Key', idempotencyKey ?? crypto.randomUUID());
   }
   return headers;
 }
@@ -242,6 +246,7 @@ function apiError(payload: unknown, response: Response): ApiClientError {
     parsedError.data?.message ?? 'The request could not be completed',
     parsedError.data?.code ?? 'REQUEST_FAILED',
     parsedError.data?.requestId ?? response.headers.get('X-Request-ID') ?? undefined,
+    response.status,
   );
 }
 
@@ -256,15 +261,16 @@ function validatedResponse<Response>(payload: unknown, schema: z.ZodType<Respons
 async function request<Response>(
   path: string,
   responseSchema: z.ZodType<Response>,
-  options: { method?: 'GET' | 'POST' | 'PATCH'; body?: unknown } = {},
+  options: { method?: 'GET' | 'POST' | 'PATCH'; body?: unknown; idempotencyKey?: string; signal?: AbortSignal } = {},
 ): Promise<Response> {
   const method = options.method ?? 'GET';
   const body = options.body === undefined ? undefined : JSON.stringify(options.body);
 
   const response = await fetch(`${apiRoot()}${path}`, {
     method,
-    headers: requestHeaders(method, body),
+    headers: requestHeaders(method, body, options.idempotencyKey),
     body,
+    signal: options.signal,
     credentials: 'include',
     cache: 'no-store',
   });
@@ -338,8 +344,13 @@ export const api = {
     return request(`/reservations${query}`, z.array(ReservationSchema));
   },
 
-  receiveStock(input: { locationId: string; skuId: string; quantity: number; note?: string }) {
-    return request('/receipts', MutationResultSchema, { method: 'POST', body: input });
+  receiveStock(input: ReceiptInput, { idempotencyKey, signal }: { idempotencyKey: string; signal: AbortSignal }) {
+    return request('/receipts', MutationResultSchema, {
+      method: 'POST',
+      body: input,
+      idempotencyKey,
+      signal,
+    });
   },
 
   createTransfer(input: {

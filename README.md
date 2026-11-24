@@ -81,6 +81,15 @@ E2E does not use or overwrite the ignored `dist/` build output. Because the API
 is a sibling Git repository, frontend-only CI reports the browser suite as
 skipped; run both mode commands above in the local multi-root workspace.
 
+## Receipt recovery
+
+If a receipt is **Awaiting confirmation**, keep the form open and choose **Retry receipt**.
+The same receipt can be confirmed even if its first reply was lost. **Recorded** shows the
+confirmed quantity and location and links to the stock movement.
+
+Before editing an unconfirmed receipt, cancelling, signing out, or reloading, check the
+location's stock ledger. The open form holds the recovery key in memory.
+
 ## Checks
 
 ```sh

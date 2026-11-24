@@ -87,7 +87,13 @@ describe('ContentProvider', () => {
 
   it.each([
     ['wrong app id', { ...contentModelSchema.parse(validModel), appId: 'other-app' }],
-    ['missing metadata', { ...contentModelSchema.parse(validModel), messages: {} }],
+    [
+      'missing metadata',
+      {
+        ...contentModelSchema.parse(validModel),
+        messages: { ...contentModelSchema.parse(validModel).messages, 'meta.title': '' },
+      },
+    ],
   ])('rejects a content model with %s', async (_label, payload) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(payload)));
     render(
@@ -98,6 +104,12 @@ describe('ContentProvider', () => {
 
     expect(await screen.findByRole('alert')).toHaveAttribute('aria-busy', 'false');
     expect(screen.queryByText(/StockSync · 5402/)).toBeNull();
+  });
+
+  it('rejects a content model missing receipt recovery copy', () => {
+    const model = contentModelSchema.parse(validModel);
+    delete model.messages['operation.receipt.awaiting'];
+    expect(contentModelSchema.safeParse(model).success).toBe(false);
   });
 
   it('shows a failure state for non-success and unreadable responses', async () => {
