@@ -72,23 +72,28 @@ npm run test:e2e
 VITE_IS_MOCK=false npm run test:e2e
 ```
 
-Each mode runs two Playwright workflows: API-backed role discovery/login and an
-inventory manager receipt through the selected API. The E2E runner uses
-isolated frontend/API ports 5403/5404 and in-memory PGlite. It makes the
-unselected endpoint unreachable, so both modes verify API selection and
-server-backed behavior without touching the local persistent data directory.
-E2E does not use or overwrite the ignored `dist/` build output. Because the API
-is a sibling Git repository, frontend-only CI reports the browser suite as
-skipped; run both mode commands above in the local multi-root workspace.
+The browser suite covers API selection, sign-in, receiving, keyboard and responsive
+recovery, delayed replies, adjustment/reservation/transfer retries, older ledger
+movements, and stale cycle counts. Both modes use the same isolated loopback API
+with in-memory PGlite. The suite makes the unselected endpoint unreachable.
+
+On Windows, build the sibling backend first and run the workspace
+`scripts/stocksync.e2e.config.mjs` and `scripts/stocksync.acceptance.config.mjs`
+adapters using the local Playwright CLI. The Windows adapter launches the compiled
+backend. Frontend-only CI skips the browser suite because it does not have the
+sibling API checkout.
 
 ## Receipt recovery
 
 If a receipt is **Awaiting confirmation**, keep the form open and choose **Retry receipt**.
-The same receipt can be confirmed even if its first reply was lost. **Recorded** shows the
-confirmed quantity and location and links to the stock movement.
+The same receipt can be confirmed even if its first reply was lost. If the retry is
+rejected, use **Inspect recent receipts** to check the ledger while keeping the
+original receipt open. **Recorded** shows the confirmed quantity and location
+and links to the exact stock movement, including older entries.
 
 Before editing an unconfirmed receipt, cancelling, signing out, or reloading, check the
-location's stock ledger. The open form holds the recovery key in memory.
+location's stock ledger. The open form holds the recovery key in memory. Adjustment,
+reservation creation, and transfer creation forms use the same retry lifecycle.
 
 ## Checks
 
@@ -100,7 +105,10 @@ npm run format:check
 npm run test:cov
 ```
 
-The API contract is maintained in the sibling backend at [openapi.yaml](https://github.com/gopichand-retail-apps/stocksync-backend/blob/main/docs/openapi.yaml). Coverage enforces 90% aggregate minimums for statements, branches, functions, and lines; `mock-mode.ts`, role option mapping, login, and inventory operation mapping also have 95% per-file gates. The latest run passed 91 tests and measured 95.54% statements, 91.36% branches, 91.80% functions, and 96.59% lines. `src/main.tsx` remains excluded as bootstrap-only wiring and is exercised through the browser workflows. The frontend has no analytics or external identity provider. Local fonts and assets are bundled with the app.
+The API contract is maintained in the sibling backend at [openapi.yaml](https://github.com/gopichand-retail-apps/stocksync-backend/blob/main/docs/openapi.yaml). Coverage enforces 90% aggregate minimums for statements, branches, functions, and lines. The mode parser, role options, login, and inventory operation mapping also have 95% per-file gates. `src/main.tsx` is bootstrap-only wiring exercised through the browser workflows. See [dated verification](docs/architecture.md#13-dated-verification-and-limitations) for the revision and measured results.
+
+On 24 November 2026, the Stage B review corrections based on `7e94a6b82a62`
+passed 120 frontend tests and the configured coverage gates.
 
 ## Vercel frontend configuration
 

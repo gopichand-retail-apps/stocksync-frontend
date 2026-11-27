@@ -1,8 +1,15 @@
 import { useDeferredValue, useEffect, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { skipToken, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { WifiOff, X } from 'lucide-react';
 import { io } from 'socket.io-client';
-import { api, apiSocketOrigin, ApiClientError, type ReceiptResult, type User } from '../../api/client';
+import {
+  api,
+  apiSocketOrigin,
+  ApiClientError,
+  type LedgerEntry,
+  type ReceiptResult,
+  type User,
+} from '../../api/client';
 import { useContent } from '../../content-context';
 import { dataStringRecord } from '../../content-schema';
 import { InventoryViews } from '../inventory/InventoryViews';
@@ -35,9 +42,58 @@ function optionalError(
 
 function refreshStockViews(queryClient: QueryClient) {
   return Promise.all(
-    ['inventory', 'overview', 'ledger', 'transfers', 'reservations'].map((key) =>
+    ['inventory', 'inventory-catalog', 'overview', 'ledger', 'transfers', 'reservations'].map((key) =>
       queryClient.invalidateQueries({ queryKey: [key] }),
     ),
+  );
+}
+
+function includeMovement(entries: LedgerEntry[] = [], movement?: LedgerEntry) {
+  if (!movement || entries.some((entry) => entry.id === movement.id)) return entries;
+  return [movement, ...entries];
+}
+
+function useLinkedMovement(receipt: ReceiptResult | null) {
+  return useQuery({
+    queryKey: ['ledger-movement', receipt?.id],
+    queryFn: receipt
+      ? async ({ signal }) => {
+          const entry = await api.getLedgerMovement(receipt.id, signal);
+          if (entry.id !== receipt.id || entry.locationId !== receipt.locationId) {
+            throw new ApiClientError('The ledger response does not match the linked movement', 'INVALID_RESPONSE');
+          }
+          return entry;
+        }
+      : skipToken,
+    networkMode: 'always',
+    retry: false,
+  });
+}
+
+function MovementLookupStatus({
+  loading,
+  failed,
+  onRetry,
+}: {
+  loading: boolean;
+  failed: boolean;
+  onRetry: () => void;
+}) {
+  const { t } = useContent();
+  if (loading)
+    return (
+      <p className="notice-bar" role="status">
+        {t('operation.receipt.loadingLedger')}
+      </p>
+    );
+  if (!failed) return null;
+  return (
+    <div className="notice-bar is-error" role="alert">
+      <span>{t('operation.receipt.movementUnavailable')}</span>
+      <button className="receipt-lookup-retry" onClick={onRetry} type="button">
+        {t('operation.receipt.retryLookup')}
+      </button>
+    </div>
   );
 }
 
@@ -78,15 +134,16 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
   const [search, setSearch] = useState('');
   const deferredSearch = useDeferredValue(search);
   const [category, setCategory] = useState('');
-  const [action, setAction] = useState<StockActionKind | null>(null);
-  const [preselectedSkuId, setPreselectedSkuId] = useState<string>();
+  const [dialog, setDialog] = useState<{ id: number; action: StockActionKind; skuId?: string } | null>(null);
+  const dialogSequence = useRef(0);
   const [notice, setNotice] = useState('');
   const [recordedReceipt, setRecordedReceipt] = useState<ReceiptResult | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [offline, setOffline] = useState(() => !navigator.onLine);
   const returnFocusRef = useRef<HTMLElement | null>(null);
-  const ledgerFocusRef = useRef<string | null>(null);
+  const [linkedReceipt, setLinkedReceipt] = useState<ReceiptResult | null>(null);
+  const focusedMovement = useRef<string | null>(null);
 
   const locationId = locationForUser(user, locationPreference);
   const locationsQuery = useQuery({ queryKey: ['locations'], queryFn: api.listLocations });
@@ -115,6 +172,7 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
     queryFn: () => api.listLedger(locationId),
     refetchInterval: 30_000,
   });
+  const linkedMovement = useLinkedMovement(linkedReceipt);
   const transfersQuery = useQuery({
     queryKey: ['transfers'],
     queryFn: api.listTransfers,
@@ -145,13 +203,12 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
   }, []);
 
   const operationMutation = useMutation({
-    mutationFn: (operation: StockOperation) => executeStockOperation(operation),
-    onSuccess: async (_result, operation) => {
-      await refreshStockViews(queryClient);
+    mutationFn: ({ operation }: { operation: StockOperation; generation: number }) => executeStockOperation(operation),
+    onSuccess: (_result, { operation, generation }) => {
+      void refreshStockViews(queryClient);
+      if (generation !== dialogSequence.current) return;
       setRecordedReceipt(null);
       setNotice(getOperationNotice(operation, t));
-      setAction(null);
-      setPreselectedSkuId(undefined);
     },
   });
   const logoutMutation = useMutation({
@@ -162,7 +219,6 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
       setLocationPreference('');
       setSearch('');
       setCategory('');
-      setAction(null);
       setNotice('');
       setRecordedReceipt(null);
     },
@@ -185,27 +241,42 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
   }, [queryClient, user.id]);
 
   useEffect(() => {
-    if (action) return;
+    if (dialog) return;
     returnFocusRef.current?.focus();
     returnFocusRef.current = null;
-  }, [action]);
+  }, [dialog]);
 
   useEffect(() => {
-    if (view !== 'ledger' || !ledgerFocusRef.current) return;
-    const movement = document.getElementById(ledgerFocusRef.current);
-    if (!movement) return;
-    movement.focus();
-    ledgerFocusRef.current = null;
-  }, [view, locationId, ledgerQuery.data, recordedReceipt]);
+    const id = linkedMovement.data?.id;
+    if (view !== 'ledger' || !id || focusedMovement.current === id) return;
+    const movement = document.getElementById(`movement-${id}`);
+    if (movement) {
+      movement.focus();
+      focusedMovement.current = id;
+    }
+  }, [view, linkedMovement.data, ledgerQuery.data, ledgerQuery.isPending]);
 
-  function confirmReceipt(receipt: ReceiptResult) {
+  function closeDialog() {
+    dialogSequence.current += 1;
+    setDialog(null);
+  }
+
+  function recordReceipt(dialogId: number, receipt: ReceiptResult) {
+    void refreshStockViews(queryClient);
+    if (dialogId !== dialogSequence.current) return;
     const location =
       dataStringRecord(model, 'locations')[receipt.locationId] ?? t('operation.receipt.selectedLocation');
     setNotice(t('operation.receipt.recorded', { quantity: receipt.quantity, location }));
     setRecordedReceipt(receipt);
-    setAction(null);
-    setPreselectedSkuId(undefined);
+    closeDialog();
+  }
+
+  function recordOperation(dialogId: number, operation: StockOperation) {
     void refreshStockViews(queryClient);
+    if (dialogId !== dialogSequence.current) return;
+    setRecordedReceipt(null);
+    setNotice(getOperationNotice(operation, t));
+    closeDialog();
   }
 
   const locations = locationsQuery.data ?? [];
@@ -221,8 +292,9 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
   function openOperation(nextAction: StockActionKind, skuId?: string) {
     const activeElement = document.activeElement;
     returnFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
-    setPreselectedSkuId(skuId);
-    setAction(nextAction);
+    const id = ++dialogSequence.current;
+    setDialog({ id, action: nextAction, skuId });
+    if (nextAction === 'count') void catalogQuery.refetch();
     if (nextAction === 'receive') {
       setNotice('');
       setRecordedReceipt(null);
@@ -231,7 +303,8 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
   }
 
   function selectView(nextView: StockView) {
-    ledgerFocusRef.current = null;
+    setLinkedReceipt(null);
+    focusedMovement.current = null;
     setView(nextView);
     setSidebarOpen(false);
     setNotice('');
@@ -241,7 +314,12 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
   function openReceiptMovement(receipt: ReceiptResult) {
     selectView('ledger');
     setLocationPreference(receipt.locationId);
-    ledgerFocusRef.current = `movement-${receipt.id}`;
+    setLinkedReceipt(receipt);
+  }
+
+  function runRowOperation(operation: StockOperation) {
+    if (dialog) return;
+    operationMutation.mutate({ operation, generation: dialogSequence.current });
   }
 
   return (
@@ -253,7 +331,7 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
         isLogoutPending={logoutMutation.isPending}
         onClose={() => setSidebarOpen(false)}
         onLogout={() => {
-          if (action === 'receive') setAction(null);
+          closeDialog();
           logoutMutation.mutate();
         }}
         onSelectView={selectView}
@@ -266,7 +344,10 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
           isRefreshing={isRefreshing}
           locationId={locationId}
           locations={locations}
-          onLocationChange={setLocationPreference}
+          onLocationChange={(location) => {
+            setLinkedReceipt(null);
+            setLocationPreference(location);
+          }}
           onRefresh={() => {
             void currentQuery.refetch();
           }}
@@ -301,6 +382,13 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
               </button>
             </div>
           )}
+          <MovementLookupStatus
+            loading={linkedMovement.isFetching}
+            failed={linkedMovement.isError}
+            onRetry={() => {
+              void linkedMovement.refetch();
+            }}
+          />
           <InventoryViews
             canManage={canManage}
             canUpdate={canUpdate}
@@ -310,13 +398,11 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
             homeLocationId={user.homeLocationId}
             isLoading={currentQuery.isPending}
             items={inventoryQuery.data ?? []}
-            ledger={ledgerQuery.data ?? []}
+            ledger={includeMovement(ledgerQuery.data, linkedMovement.data)}
             onCategoryChange={setCategory}
             onOpenOperation={openOperation}
-            onReceiveTransfer={(transferId) => operationMutation.mutate({ type: 'receive-transfer', transferId })}
-            onReleaseReservation={(reservationId) =>
-              operationMutation.mutate({ type: 'release-reservation', reservationId })
-            }
+            onReceiveTransfer={(transferId) => runRowOperation({ type: 'receive-transfer', transferId })}
+            onReleaseReservation={(reservationId) => runRowOperation({ type: 'release-reservation', reservationId })}
             onRetry={() => {
               void currentQuery.refetch();
             }}
@@ -329,19 +415,24 @@ export function AuthenticatedWorkspace({ user }: AuthenticatedWorkspaceProps) {
           />
         </main>
       </div>
-      {action && (
+      {dialog && (
         <OperationDialog
-          action={action}
+          key={dialog.id}
+          action={dialog.action}
           defaultLocationId={locationId}
-          defaultSkuId={preselectedSkuId}
-          error={requestError}
+          defaultSkuId={dialog.skuId}
           isLoadingItems={catalogQuery.isPending}
-          isPending={operationMutation.isPending}
+          isRefreshingCatalog={catalogQuery.isFetching}
+          catalogRefreshFailed={catalogQuery.isError}
           items={catalogQuery.data ?? []}
           locations={locations}
-          onClose={() => setAction(null)}
-          onReceiptRecorded={confirmReceipt}
-          onSubmit={(operation) => operationMutation.mutate(operation)}
+          onClose={closeDialog}
+          onRefreshCatalog={() => {
+            void catalogQuery.refetch();
+          }}
+          onReceiptRecorded={(receipt) => recordReceipt(dialog.id, receipt)}
+          onOperationRecorded={(operation) => recordOperation(dialog.id, operation)}
+          onSubmit={executeStockOperation}
         />
       )}
     </div>

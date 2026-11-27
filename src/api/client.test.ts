@@ -148,6 +148,31 @@ describe('StockSync API contracts', () => {
     expect(String(fetchMock.mock.calls[10]?.[0])).toBe('/api/v1/reservations');
   });
 
+  it('fetches a specific ledger movement using a safe path and an abort signal', async () => {
+    const signal = new AbortController().signal;
+    const movement = {
+      id: 'movement/one',
+      locationId: 'loc-central',
+      locationName: 'Central Market',
+      skuId: 'sku-coffee',
+      sku: 'BEV-1042',
+      productName: 'House Blend Coffee',
+      movementType: 'receipt',
+      quantityDelta: 12,
+      referenceId: 'synthetic-receipt',
+      note: null,
+      actorName: 'Morgan Patel',
+      createdAt: '2026-11-24T12:00:00.000Z',
+    };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(movement));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(api.getLedgerMovement(movement.id, signal)).resolves.toEqual(movement);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/ledger/movement%2Fone',
+      expect.objectContaining({ method: 'GET', signal }),
+    );
+  });
+
   it('hydrates and clears the CSRF token from the current session response', async () => {
     const anonymousSession = { user: null, csrfToken: null };
     const fetchMock = vi

@@ -71,5 +71,5 @@ export function StockSyncApp() {
     );
   }
 
-  return <AuthenticatedWorkspace key={user.id} user={user} />;
+  return <AuthenticatedWorkspace key={`${user.id}:${user.role}:${user.homeLocationId}`} user={user} />;
 }

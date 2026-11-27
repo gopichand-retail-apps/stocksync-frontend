@@ -102,4 +102,13 @@ describe('inventory data views', () => {
     expect(screen.queryByRole('button')).toBeNull();
     expect(screen.getByRole('img', { name: '0 available units' })).toBeInTheDocument();
   });
+
+  it('marks stock low when reservations bring available units to the threshold', () => {
+    const reservedItem = { ...item, reserved: 18, available: 24 };
+    renderWithContent(
+      <InventoryTable canManage={false} canUpdate={false} items={[reservedItem]} onOpenOperation={vi.fn()} />,
+    );
+    expect(screen.getByText('Low stock')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '24 available units' })).toHaveClass('is-low');
+  });
 });

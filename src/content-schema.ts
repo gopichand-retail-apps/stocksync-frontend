@@ -8,6 +8,16 @@ const receiptMessageKeys = [
   'operation.receipt.recorded',
   'operation.receipt.selectedLocation',
   'operation.receipt.viewMovement',
+  'operation.receipt.inspectLedger',
+  'operation.receipt.loadingLedger',
+  'operation.receipt.ledgerUnavailable',
+  'operation.receipt.movementUnavailable',
+  'operation.receipt.retryLookup',
+  'operation.retry',
+  'operation.retryRejected',
+  'operation.writeRecovery',
+  'operation.refreshCount',
+  'errors.COUNT_STALE',
 ];
 
 export const contentModelSchema = z

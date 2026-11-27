@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowDownToLine, ArrowLeftRight, Boxes, ClipboardCheck, PackageCheck, X, type LucideIcon } from 'lucide-react';
-import type { InventoryItem, Location, ReceiptResult } from '../../api/client';
+import type { InventoryItem, Location, ReceiptResult, StockWriteOptions } from '../../api/client';
 import { useContent } from '../../content-context';
 import type { StockActionKind, StockOperation } from './types';
 import {
@@ -11,15 +11,9 @@ import {
   QuantityField,
   StockContext,
 } from './OperationFields';
-import { useReceiptConfirmation } from './useReceiptConfirmation';
-
-const actionDetailKeys: Record<StockActionKind, string> = {
-  receive: 'receive',
-  transfer: 'transfer',
-  count: 'count',
-  reserve: 'reserve',
-  adjust: 'adjust',
-};
+import { confirmReceipt } from './operations';
+import { ReceiptLedgerPreview } from './ReceiptLedgerPreview';
+import { useStockWrite } from './useStockWrite';
 
 type OperationDialogProps = {
   action: StockActionKind;
@@ -27,11 +21,13 @@ type OperationDialogProps = {
   items: InventoryItem[];
   defaultLocationId: string;
   defaultSkuId?: string;
-  isPending: boolean;
   isLoadingItems: boolean;
-  error: string | null;
+  isRefreshingCatalog: boolean;
+  catalogRefreshFailed: boolean;
   onClose: () => void;
-  onSubmit: (operation: StockOperation) => void;
+  onRefreshCatalog: () => void;
+  onSubmit: (operation: StockOperation, options: StockWriteOptions) => Promise<unknown> | void;
+  onOperationRecorded: (operation: StockOperation) => void;
   onReceiptRecorded: (receipt: ReceiptResult) => void;
 };
 
@@ -52,35 +48,34 @@ function OperationFooter({
   action,
   hasSelectedItem,
   isAwaiting,
-  isPending,
-  isSubmittingReceipt,
+  isBlocked,
+  isSubmitting,
   toLocationId,
   onClose,
 }: {
   action: StockActionKind;
   hasSelectedItem: boolean;
   isAwaiting: boolean;
-  isPending: boolean;
-  isSubmittingReceipt: boolean;
+  isBlocked: boolean;
+  isSubmitting: boolean;
   toLocationId: string;
   onClose: () => void;
 }) {
   const { t } = useContent();
-  const submitKey =
-    isPending || isSubmittingReceipt
-      ? 'operation.submitting'
-      : isAwaiting
-        ? 'operation.receipt.retry'
-        : `operation.action.${action}.title`;
+  const submitKey = isSubmitting
+    ? 'operation.submitting'
+    : isAwaiting
+      ? retryKey(action)
+      : `operation.action.${action}.title`;
   return (
     <footer className="dialog-footer">
       <button className="button-secondary" onClick={onClose} type="button">
         {t('operation.cancel')}
       </button>
       <button
-        aria-disabled={isSubmittingReceipt || undefined}
+        aria-disabled={isSubmitting || undefined}
         className="button-primary"
-        disabled={isPending || !hasSelectedItem || (action === 'transfer' && !toLocationId)}
+        disabled={isBlocked || !hasSelectedItem || (action === 'transfer' && !toLocationId)}
         type="submit"
       >
         {t(submitKey)}
@@ -89,21 +84,133 @@ function OperationFooter({
   );
 }
 
+function retryKey(action: StockActionKind) {
+  return action === 'receive' ? 'operation.receipt.retry' : 'operation.retry';
+}
+
+function WriteRecovery({ action, locationId }: { action: StockActionKind; locationId: string }) {
+  const { t } = useContent();
+  return (
+    <div className="receipt-recovery">
+      <div role="status">
+        <strong>{t('operation.receipt.awaiting')}</strong>
+        <p>{t(action === 'receive' ? 'operation.receipt.recovery' : 'operation.writeRecovery')}</p>
+      </div>
+      {action === 'receive' && <ReceiptLedgerPreview locationId={locationId} />}
+    </div>
+  );
+}
+
+function wrapDialogFocus(event: KeyboardEvent, dialog: HTMLElement) {
+  const controls = dialog.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary',
+  );
+  const focusable = Array.from(controls).filter((control) => !control.closest('fieldset[disabled]'));
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  const focused = document.activeElement;
+  if (event.shiftKey && (focused === first || focused === dialog)) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && focused === last) {
+    event.preventDefault();
+    first?.focus();
+  }
+}
+
+function useCountEntry({
+  countKey,
+  item,
+  isRefreshing,
+  refreshFailed,
+}: {
+  countKey: string;
+  item?: InventoryItem;
+  isRefreshing?: boolean;
+  refreshFailed?: boolean;
+}) {
+  const [draft, setDraft] = useState<{ key: string; value: string; version: number }>();
+  const [recountKey, setRecountKey] = useState<string>();
+  const currentDraft = draft?.key === countKey ? draft : undefined;
+  const needsRecount = recountKey === countKey;
+
+  return {
+    value: currentDraft?.value ?? String(item?.onHand ?? 0),
+    version: currentDraft?.version ?? item?.version,
+    refreshing: Boolean(isRefreshing) && (needsRecount || !currentDraft),
+    refreshFailed: needsRecount && Boolean(refreshFailed),
+    requireRecount(version: number) {
+      setRecountKey(countKey);
+      setDraft({ key: countKey, value: '', version });
+    },
+    rememberSubmitted(value: number, version: number) {
+      setDraft({ key: countKey, value: String(value), version });
+    },
+    change(next: { key: string; value: string }) {
+      if (!item) return;
+      const version = needsRecount ? item.version : (currentDraft?.version ?? item.version);
+      setDraft({ ...next, version });
+      setRecountKey(undefined);
+    },
+  };
+}
+
+function stockOperation(
+  fields: {
+    action: Exclude<StockActionKind, 'receive'>;
+    locationId: string;
+    fromLocationId: string;
+    toLocationId: string;
+    skuId: string;
+    version: number;
+  },
+  form: FormData,
+): StockOperation {
+  const { action, locationId, skuId } = fields;
+  const amount = Number(form.get('operation-quantity'));
+  const note = String(form.get('operation-note') ?? '').trim();
+  switch (action) {
+    case 'transfer':
+      return {
+        type: action,
+        fromLocationId: fields.fromLocationId,
+        toLocationId: fields.toLocationId,
+        skuId,
+        quantity: amount,
+        note: note || undefined,
+      };
+    case 'count':
+      return {
+        type: action,
+        locationId,
+        skuId,
+        expectedVersion: fields.version,
+        countedQuantity: Number(form.get('counted-quantity')),
+      };
+    case 'reserve':
+      return { type: action, locationId, skuId, quantity: amount, note: note || undefined };
+    case 'adjust':
+      return { type: action, locationId, skuId, delta: amount, note };
+  }
+}
+
 export function OperationDialog({
   action,
   locations,
   items,
   defaultLocationId,
   defaultSkuId,
-  isPending,
   isLoadingItems,
-  error,
+  isRefreshingCatalog,
+  catalogRefreshFailed,
   onClose,
+  onRefreshCatalog,
   onSubmit,
+  onOperationRecorded,
   onReceiptRecorded,
 }: OperationDialogProps) {
   const { t } = useContent();
-  const receipt = useReceiptConfirmation(onReceiptRecorded);
+  const write = useStockWrite(action === 'receive');
   const [locationId, setLocationId] = useState(defaultLocationId);
   const [fromLocationId, setFromLocationId] = useState(defaultLocationId);
   const [toLocationId, setToLocationId] = useState(
@@ -111,7 +218,6 @@ export function OperationDialog({
   );
   const [skuId, setSkuId] = useState(defaultSkuId ?? items[0]?.skuId ?? '');
   const [quantity, setQuantity] = useState('1');
-  const [countDraft, setCountDraft] = useState<{ key: string; value: string } | null>(null);
   const [note, setNote] = useState('');
   const dialogRef = useRef<HTMLElement>(null);
   const closeRef = useRef(onClose);
@@ -131,20 +237,7 @@ export function OperationDialog({
         closeRef.current();
         return;
       }
-      if (event.key !== 'Tab') return;
-      const controls = dialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
-      );
-      const focusable = Array.from(controls).filter((control) => !control.closest('fieldset[disabled]'));
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
+      if (event.key === 'Tab') wrapDialogFocus(event, dialog);
     };
     dialog.addEventListener('keydown', handleKeyDown);
     return () => {
@@ -159,46 +252,51 @@ export function OperationDialog({
   const stockLocationId = action === 'transfer' ? fromLocationId : locationId;
   const selectedItem = items.find((item) => item.locationId === stockLocationId && item.skuId === skuId);
   const countKey = `${stockLocationId}:${skuId}`;
-  const countedQuantity = countDraft?.key === countKey ? countDraft.value : String(selectedItem?.onHand ?? 0);
+  const count = useCountEntry({
+    countKey,
+    item: selectedItem,
+    isRefreshing: action === 'count' && isRefreshingCatalog,
+    refreshFailed: catalogRefreshFailed,
+  });
+  const countBlocked = count.refreshing || count.refreshFailed;
   const Icon = actionIcons[action];
+
+  function submitOperation(operation: StockOperation) {
+    if (operation.type === 'count') {
+      count.rememberSubmitted(operation.countedQuantity, operation.expectedVersion);
+    }
+    void write.submit({
+      input: operation,
+      execute: onSubmit,
+      onConfirmed: () => onOperationRecorded(operation),
+      onRejected: (code) => {
+        if (operation.type !== 'count' || code !== 'COUNT_STALE') return;
+        count.requireRecount(operation.expectedVersion);
+        onRefreshCatalog();
+      },
+    });
+  }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const amount = Number(formData.get('operation-quantity'));
-    const countedAmount = Number(formData.get('counted-quantity'));
-    const submittedNote = String(formData.get('operation-note') ?? '').trim();
-    if (!selectedItem) return;
-    switch (action) {
-      case 'receive':
-        void receipt.submit({ locationId, skuId, quantity: amount, note: submittedNote || undefined });
-        break;
-      case 'transfer':
-        onSubmit({
-          type: 'transfer',
-          fromLocationId,
-          toLocationId,
-          skuId,
-          quantity: amount,
-          note: submittedNote || undefined,
-        });
-        break;
-      case 'count':
-        onSubmit({
-          type: 'count',
-          locationId,
-          skuId,
-          expectedVersion: selectedItem.version,
-          countedQuantity: countedAmount,
-        });
-        break;
-      case 'reserve':
-        onSubmit({ type: 'reserve', locationId, skuId, quantity: amount, note: submittedNote || undefined });
-        break;
-      case 'adjust':
-        onSubmit({ type: 'adjust', locationId, skuId, delta: amount, note: submittedNote });
-        break;
+    if (!selectedItem || write.isSubmitting || countBlocked) return;
+    const form = new FormData(event.currentTarget);
+    if (action === 'receive') {
+      const note = String(form.get('operation-note') ?? '').trim();
+      void write.submit({
+        input: { locationId, skuId, quantity: Number(form.get('operation-quantity')), note: note || undefined },
+        execute: confirmReceipt,
+        onConfirmed: onReceiptRecorded,
+      });
+      return;
     }
+    if (action === 'count' && !count.value) return;
+    submitOperation(
+      stockOperation(
+        { action, locationId, fromLocationId, toLocationId, skuId, version: count.version ?? selectedItem.version },
+        form,
+      ),
+    );
   }
 
   function changeFromLocation(nextLocationId: string) {
@@ -207,8 +305,6 @@ export function OperationDialog({
       setToLocationId(locations.find((location) => location.id !== nextLocationId)?.id ?? '');
     }
   }
-
-  const actionKey = actionDetailKeys[action];
 
   return (
     <div className="modal-backdrop">
@@ -225,8 +321,8 @@ export function OperationDialog({
             <Icon size={18} aria-hidden="true" />
           </div>
           <div className="dialog-title-copy">
-            <h2 id="operation-title">{t(`operation.action.${actionKey}.title`)}</h2>
-            <p>{t(`operation.action.${actionKey}.description`)}</p>
+            <h2 id="operation-title">{t(`operation.action.${action}.title`)}</h2>
+            <p>{t(`operation.action.${action}.description`)}</p>
           </div>
           <button
             aria-label={t('operation.close')}
@@ -238,8 +334,8 @@ export function OperationDialog({
             <X size={17} aria-hidden="true" />
           </button>
         </header>
-        <form className="operation-form" onSubmit={handleSubmit} onChangeCapture={receipt.resetIntent}>
-          <fieldset className="operation-form operation-fields" disabled={receipt.isSubmitting}>
+        <form className="operation-form" onSubmit={handleSubmit} onChangeCapture={write.resetIntent}>
+          <fieldset className="operation-form operation-fields" disabled={write.isSubmitting || countBlocked}>
             <OperationLocationFields
               action={action}
               fromLocationId={fromLocationId}
@@ -255,26 +351,26 @@ export function OperationDialog({
             <QuantityField
               action={action}
               countKey={countKey}
-              countedQuantity={countedQuantity}
-              onCountChange={setCountDraft}
+              countedQuantity={count.value}
+              onCountChange={count.change}
               onQuantityChange={setQuantity}
               quantity={quantity}
             />
             <NoteField action={action} note={note} onNoteChange={setNote} />
           </fieldset>
-          {receipt.isUnconfirmed && (
-            <div className="receipt-recovery" role="status">
-              <strong>{t('operation.receipt.awaiting')}</strong>
-              <p>{t('operation.receipt.recovery')}</p>
-            </div>
+          {write.isUnconfirmed && <WriteRecovery action={action} locationId={locationId} />}
+          {count.refreshFailed && (
+            <button className="button-secondary" onClick={onRefreshCatalog} type="button">
+              {t('operation.refreshCount')}
+            </button>
           )}
-          <OperationFeedback error={receipt.error ?? error} isLoadingItems={isLoadingItems} products={products} />
+          <OperationFeedback error={write.error} isLoadingItems={isLoadingItems} products={products} />
           <OperationFooter
             action={action}
             hasSelectedItem={Boolean(selectedItem)}
-            isAwaiting={receipt.isUnconfirmed}
-            isPending={isPending}
-            isSubmittingReceipt={receipt.isSubmitting}
+            isAwaiting={write.isUnconfirmed}
+            isBlocked={countBlocked}
+            isSubmitting={write.isSubmitting}
             onClose={onClose}
             toLocationId={toLocationId}
           />

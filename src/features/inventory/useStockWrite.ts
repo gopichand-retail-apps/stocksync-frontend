@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, ApiClientError, type ReceiptInput, type ReceiptResult } from '../../api/client';
+import { ApiClientError, type StockWriteOptions } from '../../api/client';
 import { useContent } from '../../content-context';
 
-const receiptTimeoutMs = 15_000;
+const writeTimeoutMs = 15_000;
 
 function rejectionCode(error: unknown): string | null {
   if (!(error instanceof ApiClientError) || error.httpStatus === undefined) return null;
@@ -10,7 +10,7 @@ function rejectionCode(error: unknown): string | null {
   return status >= 400 && status < 500 && status !== 408 ? error.code : null;
 }
 
-export function useReceiptConfirmation(onRecorded: (receipt: ReceiptResult) => void) {
+export function useStockWrite(isReceipt: boolean) {
   const { model, t } = useContent();
   const intent = useRef<{ key: string; payload: string } | null>(null);
   const active = useRef<AbortController | null>(null);
@@ -32,10 +32,20 @@ export function useReceiptConfirmation(onRecorded: (receipt: ReceiptResult) => v
     setErrorCode(null);
   }
 
-  async function submit(input: ReceiptInput) {
+  async function submit<Input, Result>({
+    input,
+    execute,
+    onConfirmed,
+    onRejected,
+  }: {
+    input: Input;
+    execute: (input: Input, options: StockWriteOptions) => Promise<Result> | Result;
+    onConfirmed: (result: Result) => void;
+    onRejected?: (code: string) => void;
+  }) {
     if (active.current) return;
     const attempt = new AbortController();
-    const timeout = window.setTimeout(() => attempt.abort(), receiptTimeoutMs);
+    const timeout = window.setTimeout(() => attempt.abort(), writeTimeoutMs);
     active.current = attempt;
     const payload = JSON.stringify(input);
     if (intent.current?.payload !== payload) {
@@ -45,15 +55,17 @@ export function useReceiptConfirmation(onRecorded: (receipt: ReceiptResult) => v
     setIsSubmitting(true);
     setErrorCode(null);
 
-    let receipt: ReceiptResult;
+    let result: Result;
     try {
-      receipt = await api.receiveStock(input, { idempotencyKey: intent.current.key, signal: attempt.signal });
+      result = await execute(input, { idempotencyKey: intent.current.key, signal: attempt.signal });
     } catch (error) {
       // Unmount clears the key. A deadline abort leaves this intent available for a retry.
       if (intent.current === null) return;
       const code = rejectionCode(error);
-      if (code) setErrorCode(code);
-      else setIsUnconfirmed(true);
+      if (code) {
+        setErrorCode(code);
+        onRejected?.(code);
+      } else setIsUnconfirmed(true);
       return;
     } finally {
       window.clearTimeout(timeout);
@@ -62,12 +74,12 @@ export function useReceiptConfirmation(onRecorded: (receipt: ReceiptResult) => v
     }
     if (intent.current === null) return;
     resetIntent();
-    onRecorded(receipt);
+    onConfirmed(result);
   }
 
   const messageKey = `errors.${errorCode}`;
-  const error = errorCode
-    ? t(Object.hasOwn(model.messages, messageKey) ? messageKey : 'operation.receipt.rejected')
-    : null;
+  const fallback = isReceipt ? 'operation.receipt.rejected' : 'errors.requestFailed';
+  const rejectionKey = Object.hasOwn(model.messages, messageKey) ? messageKey : fallback;
+  const error = errorCode && t(isUnconfirmed ? 'operation.retryRejected' : rejectionKey);
   return { submit, resetIntent, isSubmitting, isUnconfirmed, error };
 }

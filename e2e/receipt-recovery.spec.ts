@@ -32,7 +32,7 @@ async function stockAndReceipts(page: Page) {
   };
 }
 
-test('a lost receipt response and retry create exactly one stock movement', async ({ page }) => {
+test('a lost receipt response and retry create exactly one stock movement', async ({ page }, testInfo) => {
   const trigger = await signIn(page);
   const before = await stockAndReceipts(page);
   await trigger.click();
@@ -95,6 +95,11 @@ test('a lost receipt response and retry create exactly one stock movement', asyn
   const afterNext = await stockAndReceipts(page);
   expect(afterNext.receipts).toHaveLength(before.receipts.length + 2);
   expect(afterNext.onHand).toBe(before.onHand + 2 * quantity);
+  const quantities = [before.onHand, afterLostReply.onHand, afterRetry.onHand, afterNext.onHand];
+  await testInfo.attach('On-hand before, committed, replayed, second delivery', {
+    body: JSON.stringify(quantities),
+    contentType: 'application/json',
+  });
 });
 
 async function tabTo(page: Page, control: Locator, limit = 30) {
@@ -129,6 +134,8 @@ test('receipt recovery and keyboard path at 320, 390, 768 and 1280px fresh and r
       await page.keyboard.press('Enter');
       const dialog = page.getByRole('dialog');
       await expect(dialog).toBeFocused();
+      await page.keyboard.press('Shift+Tab');
+      await expect(dialog.getByRole('button', { name: 'Receive stock', exact: true })).toBeFocused();
       const quantityInput = dialog.getByLabel('Quantity');
       await tabTo(page, quantityInput);
       await page.keyboard.press('ControlOrMeta+a');

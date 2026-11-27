@@ -205,6 +205,7 @@ export type Transfer = z.infer<typeof TransferSchema>;
 export type Reservation = z.infer<typeof ReservationSchema>;
 export type ReceiptInput = { locationId: string; skuId: string; quantity: number; note?: string };
 export type ReceiptResult = z.infer<typeof MutationResultSchema>;
+export type StockWriteOptions = { idempotencyKey: string; signal: AbortSignal };
 
 export class ApiClientError extends Error {
   readonly code: string;
@@ -335,6 +336,10 @@ export const api = {
     return request(`/ledger${query}`, z.array(LedgerEntrySchema));
   },
 
+  getLedgerMovement(id: string, signal?: AbortSignal): Promise<LedgerEntry> {
+    return request(`/ledger/${encodeURIComponent(id)}`, LedgerEntrySchema, { signal });
+  },
+
   listTransfers(): Promise<Transfer[]> {
     return request('/transfers', z.array(TransferSchema));
   },
@@ -344,39 +349,41 @@ export const api = {
     return request(`/reservations${query}`, z.array(ReservationSchema));
   },
 
-  receiveStock(input: ReceiptInput, { idempotencyKey, signal }: { idempotencyKey: string; signal: AbortSignal }) {
+  receiveStock(input: ReceiptInput, options: StockWriteOptions) {
     return request('/receipts', MutationResultSchema, {
       method: 'POST',
       body: input,
-      idempotencyKey,
-      signal,
+      ...options,
     });
   },
 
-  createTransfer(input: {
-    fromLocationId: string;
-    toLocationId: string;
-    skuId: string;
-    quantity: number;
-    note?: string;
-  }) {
-    return request('/transfers', TransferResultSchema, { method: 'POST', body: input });
+  createTransfer(
+    input: { fromLocationId: string; toLocationId: string; skuId: string; quantity: number; note?: string },
+    options?: StockWriteOptions,
+  ) {
+    return request('/transfers', TransferResultSchema, { method: 'POST', body: input, ...options });
   },
 
   receiveTransfer(transferId: string) {
     return request(`/transfers/${transferId}/receive`, ReceivedTransferSchema, { method: 'PATCH' });
   },
 
-  reconcileCount(input: { locationId: string; skuId: string; expectedVersion: number; countedQuantity: number }) {
-    return request('/cycle-counts', CountResultSchema, { method: 'POST', body: input });
+  reconcileCount(
+    input: { locationId: string; skuId: string; expectedVersion: number; countedQuantity: number },
+    options?: StockWriteOptions,
+  ) {
+    return request('/cycle-counts', CountResultSchema, { method: 'POST', body: input, ...options });
   },
 
-  adjustStock(input: { locationId: string; skuId: string; delta: number; note: string }) {
-    return request('/adjustments', MutationResultSchema, { method: 'POST', body: input });
+  adjustStock(input: { locationId: string; skuId: string; delta: number; note: string }, options?: StockWriteOptions) {
+    return request('/adjustments', MutationResultSchema, { method: 'POST', body: input, ...options });
   },
 
-  reserveStock(input: { locationId: string; skuId: string; quantity: number; note?: string }) {
-    return request('/reservations', ReservationResultSchema, { method: 'POST', body: input });
+  reserveStock(
+    input: { locationId: string; skuId: string; quantity: number; note?: string },
+    options?: StockWriteOptions,
+  ) {
+    return request('/reservations', ReservationResultSchema, { method: 'POST', body: input, ...options });
   },
 
   releaseReservation(reservationId: string) {

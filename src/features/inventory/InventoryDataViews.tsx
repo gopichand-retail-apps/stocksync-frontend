@@ -140,7 +140,7 @@ export function OverviewContent({ overview, ledger, canUpdate, onOpenOperation }
                   </div>
                   <div className="low-stock-quantity">
                     <span>
-                      {formatNumber(item.onHand, model.locale)} / {formatNumber(item.threshold, model.locale)}{' '}
+                      {formatNumber(item.available, model.locale)} / {formatNumber(item.threshold, model.locale)}{' '}
                       {units[item.unit]}
                     </span>
                     {canUpdate && (
@@ -180,7 +180,7 @@ export function OverviewContent({ overview, ledger, canUpdate, onOpenOperation }
 
 function StockStatus({ item }: { item: InventoryItem }) {
   const { t } = useContent();
-  const low = item.onHand <= item.threshold;
+  const low = item.available <= item.threshold;
   return (
     <span className={`stock-status${low ? ' is-low' : ''}`}>
       {low ? <CircleAlert size={11} /> : <CheckCircle2 size={11} />}
@@ -220,7 +220,7 @@ export function InventoryTable({ items, canUpdate, canManage, onOpenOperation }:
         <tbody>
           {items.map((item) => {
             const percent = Math.min(100, Math.round((item.available / Math.max(item.threshold * 2, 1)) * 100));
-            const low = item.onHand <= item.threshold;
+            const low = item.available <= item.threshold;
             return (
               <tr key={`${item.locationId}-${item.skuId}`}>
                 <td>
