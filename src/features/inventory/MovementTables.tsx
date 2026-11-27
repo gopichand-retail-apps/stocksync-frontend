@@ -197,7 +197,7 @@ export function LedgerTable({ entries }: { entries: LedgerEntry[] }) {
         </thead>
         <tbody>
           {entries.map((entry) => (
-            <tr key={entry.id}>
+            <tr id={`movement-${entry.id}`} key={entry.id} tabIndex={-1}>
               <td>
                 <span className="ledger-type">
                   <ArrowUpRight size={12} aria-hidden="true" />

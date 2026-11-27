@@ -3,7 +3,6 @@ export type StockView = 'overview' | 'inventory' | 'transfers' | 'reservations' 
 export type StockActionKind = 'receive' | 'transfer' | 'count' | 'reserve' | 'adjust';
 
 export type StockOperation =
-  | { type: 'receive'; locationId: string; skuId: string; quantity: number; note?: string }
   | {
       type: 'transfer';
       fromLocationId: string;

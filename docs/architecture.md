@@ -157,6 +157,40 @@ sequenceDiagram
 
 Invalid authorization or schema input is rejected before the stock transaction. A transaction failure rolls back the balance, ledger row, and idempotency record together; replayed commands do not publish a second stock event.
 
+### STK-01 receipt intent and recovery
+
+The open receipt form creates an opaque UUID at the first submit. It passes that key to
+`POST /api/v1/receipts` alongside the existing CSRF token and a new `X-Request-ID` per attempt.
+Only one receipt attempt can be active per form. Each has a 15-second response deadline.
+An ambiguous result (network failure, timeout, unreadable reply, or server failure) leaves
+the form and its key available for an explicit retry. A definitive client rejection is
+displayed using the content model's error copy. A rejection on a later attempt does not
+resolve a prior ambiguous attempt.
+
+Only a validated API result produces the **Recorded** notice and its link to the movement
+ID. The notice, retry instructions and accessible labels come from `stocksync-model.json`.
+An edit to SKU, location, quantity, or note clears the previous key. Closing the form,
+signing out, switching actor, reloading, or confirming the receipt ends that recovery
+window. There is no receipt key in browser storage. Aborting an HTTP attempt only ends
+the client's wait. Check the ledger before entering the delivery again after closing
+an unconfirmed receipt.
+
+Adjustment, reservation creation, transfer creation, and cycle-count forms use the
+same dialog-owned operation lifecycle. The form owns its key and request deadline.
+Completion handlers check the submitting dialog ID before changing workspace state.
+Background row actions can refresh inventory without dismissing a newer dialog.
+
+Receipt confirmation also checks movement type, a positive quantity, and matching
+SKU, location, and quantity. A rejected retry leaves the earlier attempt unresolved.
+The receipt dialog can show recent receipts for its location while retaining the
+intent. A confirmed receipt's link fetches the exact ledger movement by ID, with a
+retry action if the lookup fails.
+
+Stock changes and inventory events invalidate the operation catalog. A count draft
+uses the version observed when entry began. A stale version response refreshes the
+catalog and requires a new physical count. Available stock controls the low-stock
+status, meter, and overview.
+
 ## 6. Domain, persistence, and data ownership
 
 The frontend consumes server-owned domain records; its model supplies presentation and synthetic display content. Local UI state cannot replace backend transaction or authorization decisions.
@@ -285,7 +319,15 @@ The two Git repositories remain separate. Each owns one maintained README and th
 
 ## 13. Dated verification and limitations
 
-Last documentation review: **2026-11-09**. The checks below distinguish documentation validation from application and deployment testing.
+The 24 November 2026 Stage B review corrections were verified locally on the
+working tree based on `7e94a6b82a62`. Build, lint, formatting, and 120 tests
+passed. Coverage was 96.45% statements, 90.77% branches, 95.78% functions, and
+98.38% lines. The configured frontend coverage gates passed.
+The workspace Windows E2E adapter passed 8 cases per API mode, and the
+acceptance adapter passed 2 cases per mode. Both used synthetic data in an
+isolated loopback API with in-memory PGlite.
+
+Historical documentation review: **2026-11-09**. The checks below distinguish documentation validation from application and deployment testing.
 
 - Repository-local guide, README link, source-path references, section/contents anchors, and Mermaid syntax: passed documentation validation.
 - New application tests/builds, coverage, dependency audits, browser/device accessibility/performance, hosted CI, and Vercel deployment: **not rerun for the documentation updates**.
@@ -320,8 +362,8 @@ npm run build
 npm audit --audit-level=high
 ```
 
-Latest frontend coverage passed 91 tests: 95.54% statements, 91.36% branches,
-91.80% functions, and 96.59% lines. Latest backend coverage passed 68 tests:
+The earlier documented frontend coverage passed 91 tests: 95.54% statements, 91.36% branches,
+91.80% functions, and 96.59% lines. The earlier backend coverage passed 68 tests:
 97.17% statements, 91.63% branches, 96.09% functions, and 97.78% lines. The
 aggregate 90% gates pass. Additional 95% frontend file gates cover mode
 selection, role mapping, login, and inventory-operation mapping; backend

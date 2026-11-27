@@ -6,7 +6,6 @@ import { executeStockOperation, getOperationNotice } from './operations';
 afterEach(() => vi.restoreAllMocks());
 
 const noticeCases: Array<[StockOperation, string]> = [
-  [{ type: 'receive', locationId: 'loc-central', skuId: 'sku-soap', quantity: 1 }, 'notice.receive'],
   [
     {
       type: 'transfer',
@@ -28,34 +27,6 @@ const noticeCases: Array<[StockOperation, string]> = [
 ];
 
 describe('executeStockOperation request contracts', () => {
-  it('omits the UI discriminator from a receipt request', async () => {
-    const receipt = vi.spyOn(api, 'receiveStock').mockResolvedValue({
-      id: '682163f7-b8d3-4e18-8944-df558e3e9ab2',
-      locationId: 'loc-central',
-      skuId: 'sku-soap',
-      quantity: 1,
-      onHand: 10,
-      version: 2,
-      movementType: 'receipt',
-    });
-
-    await executeStockOperation({
-      type: 'receive',
-      locationId: 'loc-central',
-      skuId: 'sku-soap',
-      quantity: 1,
-      note: 'delivery',
-    });
-
-    expect(receipt).toHaveBeenCalledOnce();
-    expect(receipt).toHaveBeenCalledWith({
-      locationId: 'loc-central',
-      skuId: 'sku-soap',
-      quantity: 1,
-      note: 'delivery',
-    });
-  });
-
   it('sends only the transfer contract fields', async () => {
     const transfer = vi.spyOn(api, 'createTransfer').mockResolvedValue({
       id: '682163f7-b8d3-4e18-8944-df558e3e9ab2',

@@ -1,11 +1,36 @@
 import { z } from 'zod';
 
+const receiptMessageKeys = [
+  'operation.receipt.awaiting',
+  'operation.receipt.recovery',
+  'operation.receipt.retry',
+  'operation.receipt.rejected',
+  'operation.receipt.recorded',
+  'operation.receipt.selectedLocation',
+  'operation.receipt.viewMovement',
+  'operation.receipt.inspectLedger',
+  'operation.receipt.loadingLedger',
+  'operation.receipt.ledgerUnavailable',
+  'operation.receipt.movementUnavailable',
+  'operation.receipt.retryLookup',
+  'operation.retry',
+  'operation.retryRejected',
+  'operation.writeRecovery',
+  'operation.refreshCount',
+  'errors.COUNT_STALE',
+];
+
 export const contentModelSchema = z
   .object({
     version: z.literal(1),
     appId: z.string().min(1),
     locale: z.string().min(2),
-    messages: z.record(z.string(), z.string()),
+    messages: z
+      .record(z.string(), z.string())
+      .refine(
+        (messages) => receiptMessageKeys.every((key) => Boolean(messages[key]?.trim())),
+        'Receipt messages are required',
+      ),
     data: z.record(z.string(), z.unknown()),
   })
   .strict();

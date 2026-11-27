@@ -52,6 +52,6 @@ test('an inventory manager receives stock through the selected API', async ({ pa
   await dialog.getByRole('button', { name: 'Receive stock' }).click();
 
   expect((await receiptResponse).status()).toBe(201);
-  await expect(page.getByText('Stock receipt recorded. On-hand quantity is updated.')).toBeVisible();
+  await expect(page.getByText('Recorded: 2 units at Central Market.')).toBeVisible();
   await expect(dialog).not.toBeVisible();
 });

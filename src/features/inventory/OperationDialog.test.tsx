@@ -1,7 +1,7 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { InventoryItem, Location } from '../../api/client';
+import { api, ApiClientError, type InventoryItem, type Location, type ReceiptResult } from '../../api/client';
 import { TestContentProvider } from '../../test/contentProvider';
 import { OperationDialog } from './OperationDialog';
 import type { StockActionKind, StockOperation } from './types';
@@ -30,17 +30,31 @@ const inventoryItem: InventoryItem = {
   updatedAt: '2026-10-30T12:00:00.000Z',
 };
 
+const writeOptions = { idempotencyKey: expect.any(String), signal: expect.any(AbortSignal) };
+const validReceipt: ReceiptResult = {
+  id: '682163f7-b8d3-4e18-8944-df558e3e9ab2',
+  locationId: 'loc-central',
+  skuId: 'sku-coffee',
+  quantity: 1,
+  onHand: 43,
+  version: 5,
+  movementType: 'receipt',
+};
+
 function renderDialog(action: StockActionKind, overrides: Partial<React.ComponentProps<typeof OperationDialog>> = {}) {
   const props: React.ComponentProps<typeof OperationDialog> = {
     action,
     locations,
     items: [inventoryItem],
     defaultLocationId: 'loc-central',
-    isPending: false,
     isLoadingItems: false,
-    error: null,
+    isRefreshingCatalog: false,
+    catalogRefreshFailed: false,
     onClose: vi.fn(),
+    onRefreshCatalog: vi.fn(),
     onSubmit: vi.fn(),
+    onOperationRecorded: vi.fn(),
+    onReceiptRecorded: vi.fn(),
     ...overrides,
   };
   return {
@@ -54,9 +68,23 @@ function renderDialog(action: StockActionKind, overrides: Partial<React.Componen
 }
 
 describe('OperationDialog', () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it('submits a stock receipt with only server contract fields', async () => {
+    const received = {
+      id: '682163f7-b8d3-4e18-8944-df558e3e9ab2',
+      locationId: 'loc-central',
+      skuId: 'sku-coffee',
+      quantity: 5,
+      onHand: 47,
+      version: 5,
+      movementType: 'receipt',
+    };
+    const receive = vi.spyOn(api, 'receiveStock').mockResolvedValue(received);
     const user = userEvent.setup();
     const { props } = renderDialog('receive');
     const quantity = screen.getByLabelText('Quantity');
@@ -66,13 +94,161 @@ describe('OperationDialog', () => {
     await user.type(screen.getByLabelText('Reference note (optional)'), 'delivery');
     await user.click(screen.getByRole('button', { name: 'Receive stock' }));
 
-    expect(props.onSubmit).toHaveBeenCalledWith({
-      type: 'receive',
-      locationId: 'loc-central',
-      skuId: 'sku-coffee',
-      quantity: 5,
-      note: 'delivery',
+    expect(receive).toHaveBeenCalledWith(
+      { locationId: 'loc-central', skuId: 'sku-coffee', quantity: 5, note: 'delivery' },
+      { idempotencyKey: expect.any(String), signal: expect.any(AbortSignal) },
+    );
+    expect(props.onReceiptRecorded).toHaveBeenCalledWith(received);
+  });
+
+  it.each([
+    new TypeError('Network connection lost'),
+    new ApiClientError('server failure', 'INTERNAL_ERROR', undefined, 503),
+    new ApiClientError('timeout', 'REQUEST_TIMEOUT', undefined, 408),
+    new ApiClientError('unreadable reply', 'INVALID_RESPONSE'),
+  ])('retries an ambiguous receipt with the same in-memory key', async (failure) => {
+    const receive = vi.spyOn(api, 'receiveStock').mockRejectedValue(failure);
+    const user = userEvent.setup();
+    renderDialog('receive');
+
+    await user.click(screen.getByRole('button', { name: 'Receive stock' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Awaiting confirmation');
+    await user.click(screen.getByRole('button', { name: 'Retry receipt' }));
+    expect(receive).toHaveBeenCalledTimes(2);
+    expect(receive.mock.calls[1]?.[0]).toEqual(receive.mock.calls[0]?.[0]);
+    expect(receive.mock.calls[1]?.[1].idempotencyKey).toBe(receive.mock.calls[0]?.[1].idempotencyKey);
+  });
+
+  it.each([
+    { locationId: 'loc-north' },
+    { skuId: 'sku-soap' },
+    { quantity: 2 },
+    { quantity: -1 },
+    { movementType: 'adjustment' },
+  ])('keeps a mismatched receipt response unconfirmed (%j)', async (changes) => {
+    const receive = vi
+      .spyOn(api, 'receiveStock')
+      .mockResolvedValueOnce({ ...validReceipt, ...changes })
+      .mockResolvedValueOnce(validReceipt);
+    const user = userEvent.setup();
+    const { props } = renderDialog('receive');
+    await user.click(screen.getByRole('button', { name: 'Receive stock' }));
+    expect(await screen.findByText('Awaiting confirmation')).toBeVisible();
+    expect(props.onReceiptRecorded).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Quantity')).toHaveValue(1);
+    await user.click(screen.getByRole('button', { name: 'Retry receipt' }));
+    expect(props.onReceiptRecorded).toHaveBeenCalledOnce();
+    expect(props.onReceiptRecorded).toHaveBeenCalledWith(validReceipt);
+    expect(receive.mock.calls[1]?.[1].idempotencyKey).toBe(receive.mock.calls[0]?.[1].idempotencyKey);
+  });
+
+  it('explains a rejected retry while retaining the original receipt intent', async () => {
+    const receive = vi
+      .spyOn(api, 'receiveStock')
+      .mockRejectedValueOnce(new TypeError('Network failure'))
+      .mockRejectedValueOnce(new ApiClientError('Conflict', 'REQUEST_REJECTED', undefined, 409))
+      .mockResolvedValueOnce(validReceipt);
+    const user = userEvent.setup();
+    renderDialog('receive');
+    await user.click(screen.getByRole('button', { name: 'Receive stock' }));
+    await user.click(await screen.findByRole('button', { name: 'Retry receipt' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The original attempt may still have been recorded.');
+    expect(screen.getByText('Inspect recent receipts')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Retry receipt' }));
+    expect(new Set(receive.mock.calls.map(([, options]) => options.idempotencyKey)).size).toBe(1);
+  });
+
+  it.each([
+    ['ROLE_NOT_ALLOWED', 403, 'The selected role cannot perform this action.'],
+    ['UNRECOGNIZED', 409, 'The receipt request was rejected.'],
+  ])('shows a safe rejection after a definitive HTTP failure', async (code, status, message) => {
+    vi.spyOn(api, 'receiveStock').mockRejectedValue(new ApiClientError('private details', code, undefined, status));
+    const user = userEvent.setup();
+    renderDialog('receive');
+
+    await user.click(screen.getByRole('button', { name: 'Receive stock' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(message);
+    expect(alert).not.toHaveTextContent('private details');
+    expect(screen.queryByText('Awaiting confirmation')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Receive stock' })).toBeEnabled();
+  });
+
+  it.each([
+    ['Quantity', '2'],
+    ['Product', 'sku-soap'],
+    ['Location', 'loc-north'],
+    ['Reference note (optional)', 'another delivery'],
+  ])('discards an unresolved key when %s changes', async (label, value) => {
+    const receive = vi.spyOn(api, 'receiveStock').mockRejectedValue(new TypeError('Network failure'));
+    const user = userEvent.setup();
+    renderDialog('receive', {
+      items: [
+        inventoryItem,
+        { ...inventoryItem, skuId: 'sku-soap', sku: 'HOM-0812' },
+        { ...inventoryItem, locationId: 'loc-north', locationName: 'Northline Store' },
+      ],
     });
+
+    await user.click(screen.getByRole('button', { name: 'Receive stock' }));
+    expect(await screen.findByText('Awaiting confirmation')).toBeVisible();
+    fireEvent.change(screen.getByLabelText(label, { exact: true }), { target: { value } });
+    expect(screen.queryByText('Awaiting confirmation')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Receive stock' }));
+    expect(receive).toHaveBeenCalledTimes(2);
+    expect(receive.mock.calls[1]?.[1].idempotencyKey).not.toBe(receive.mock.calls[0]?.[1].idempotencyKey);
+  });
+
+  it('blocks duplicate submission while saving and releases the same key after the deadline', async () => {
+    vi.useFakeTimers();
+    const receive = vi.spyOn(api, 'receiveStock').mockImplementation(
+      (_input, { signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    const { unmount, props } = renderDialog('receive');
+    const form = screen.getByRole('button', { name: 'Receive stock' }).closest('form');
+    if (!form) throw new Error('The receipt submit button must belong to the receipt form');
+
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(receive).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Saving…' })).toHaveAttribute('aria-disabled', 'true');
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+    expect(screen.getByRole('status')).toHaveTextContent('Awaiting confirmation');
+    fireEvent.submit(form);
+    expect(receive.mock.calls[1]?.[1].idempotencyKey).toBe(receive.mock.calls[0]?.[1].idempotencyKey);
+    unmount();
+    expect(receive.mock.calls[1]?.[1].signal.aborted).toBe(true);
+    expect(props.onReceiptRecorded).not.toHaveBeenCalled();
+  });
+
+  it('ignores a confirmation that arrives after its form was abandoned', async () => {
+    const deferred: { resolve?: (receipt: ReceiptResult) => void } = {};
+    const reply = new Promise<ReceiptResult>((resolve) => {
+      deferred.resolve = resolve;
+    });
+    vi.spyOn(api, 'receiveStock').mockReturnValue(reply);
+    const user = userEvent.setup();
+    const { props, unmount } = renderDialog('receive');
+
+    await user.click(screen.getByRole('button', { name: 'Receive stock' }));
+    unmount();
+    await act(async () => {
+      if (!deferred.resolve) throw new Error('The receipt promise resolver is missing');
+      deferred.resolve({
+        id: '682163f7-b8d3-4e18-8944-df558e3e9ab2',
+        locationId: 'loc-central',
+        skuId: 'sku-coffee',
+        quantity: 1,
+        onHand: 43,
+        version: 5,
+        movementType: 'receipt',
+      });
+      await reply;
+    });
+    expect(props.onReceiptRecorded).not.toHaveBeenCalled();
   });
 
   it('requires distinct source and destination locations for transfers', async () => {
@@ -86,14 +262,17 @@ describe('OperationDialog', () => {
     expect(quantity).toHaveValue(3);
     await user.click(screen.getByRole('button', { name: 'Create transfer' }));
 
-    expect(props.onSubmit).toHaveBeenCalledWith({
-      type: 'transfer',
-      fromLocationId: 'loc-central',
-      toLocationId: 'loc-north',
-      skuId: 'sku-coffee',
-      quantity: 3,
-      note: undefined,
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      {
+        type: 'transfer',
+        fromLocationId: 'loc-central',
+        toLocationId: 'loc-north',
+        skuId: 'sku-coffee',
+        quantity: 3,
+        note: undefined,
+      },
+      writeOptions,
+    );
   });
 
   it('preloads the physical count and submits the current inventory version', async () => {
@@ -106,13 +285,70 @@ describe('OperationDialog', () => {
     await user.type(countField, '40');
     await user.click(screen.getByRole('button', { name: 'Reconcile cycle count' }));
 
-    expect(props.onSubmit).toHaveBeenCalledWith({
-      type: 'count',
-      locationId: 'loc-central',
-      skuId: 'sku-coffee',
-      expectedVersion: 4,
-      countedQuantity: 40,
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      {
+        type: 'count',
+        locationId: 'loc-central',
+        skuId: 'sku-coffee',
+        expectedVersion: 4,
+        countedQuantity: 40,
+      },
+      writeOptions,
+    );
+  });
+
+  it('requires a fresh balance and a newly entered count after a stale-version conflict', async () => {
+    const onSubmit = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiClientError('Stale count', 'COUNT_STALE', undefined, 409))
+      .mockResolvedValue(undefined);
+    const onRefreshCatalog = vi.fn();
+    const user = userEvent.setup();
+    const rendered = renderDialog('count', { onSubmit, onRefreshCatalog });
+    const submit = screen.getByRole('button', { name: 'Reconcile cycle count' });
+    const count = screen.getByLabelText('Physical count');
+    await user.click(submit);
+    expect(await screen.findByRole('alert')).toHaveTextContent('enter a new physical count');
+    expect(count).toHaveValue(null);
+    expect(onRefreshCatalog).toHaveBeenCalledOnce();
+    const update = (props: Partial<React.ComponentProps<typeof OperationDialog>>) =>
+      rendered.rerender(
+        <TestContentProvider>
+          <OperationDialog {...rendered.props} {...props} />
+        </TestContentProvider>,
+      );
+    update({ isRefreshingCatalog: true });
+    expect(count).toBeDisabled();
+    update({ catalogRefreshFailed: true });
+    expect(count).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Refresh current stock' }));
+    expect(onRefreshCatalog).toHaveBeenCalledTimes(2);
+    update({ items: [{ ...inventoryItem, onHand: 45, available: 42, version: 5 }] });
+    expect(count).toHaveValue(null);
+    await user.type(count, '44');
+    await user.click(screen.getByRole('button', { name: 'Reconcile cycle count' }));
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ expectedVersion: 5, countedQuantity: 44 }),
+      writeOptions,
+    );
+    expect(onSubmit.mock.calls[0]?.[1].idempotencyKey).not.toBe(onSubmit.mock.calls[1]?.[1].idempotencyKey);
+  });
+
+  it('retains the submitted count and its key if stock refreshes before retry', async () => {
+    const onSubmit = vi.fn().mockRejectedValueOnce(new TypeError('Lost response')).mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const rendered = renderDialog('count', { onSubmit });
+    await user.click(screen.getByRole('button', { name: 'Reconcile cycle count' }));
+    expect(await screen.findByText('Awaiting confirmation')).toBeVisible();
+    rendered.rerender(
+      <TestContentProvider>
+        <OperationDialog {...rendered.props} items={[{ ...inventoryItem, onHand: 45, available: 42, version: 5 }]} />
+      </TestContentProvider>,
+    );
+    expect(screen.getByLabelText('Physical count')).toHaveValue(42);
+    await user.click(screen.getByRole('button', { name: 'Retry operation' }));
+    expect(onSubmit.mock.calls[1]?.[0]).toEqual(onSubmit.mock.calls[0]?.[0]);
+    expect(onSubmit.mock.calls[1]?.[1].idempotencyKey).toBe(onSubmit.mock.calls[0]?.[1].idempotencyKey);
   });
 
   it('submits a reservation with an optional reference note', async () => {
@@ -124,13 +360,16 @@ describe('OperationDialog', () => {
     expect(quantity).toHaveValue(2);
     await user.click(screen.getByRole('button', { name: 'Reserve stock' }));
 
-    expect(props.onSubmit).toHaveBeenCalledWith({
-      type: 'reserve',
-      locationId: 'loc-central',
-      skuId: 'sku-coffee',
-      quantity: 2,
-      note: undefined,
-    });
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      {
+        type: 'reserve',
+        locationId: 'loc-central',
+        skuId: 'sku-coffee',
+        quantity: 2,
+        note: undefined,
+      },
+      writeOptions,
+    );
   });
 
   it('requires an audit note for adjustments and restores focus on Escape', async () => {
@@ -143,11 +382,14 @@ describe('OperationDialog', () => {
       locations,
       items: [inventoryItem],
       defaultLocationId: 'loc-central',
-      isPending: false,
       isLoadingItems: false,
-      error: null,
+      isRefreshingCatalog: false,
+      catalogRefreshFailed: false,
       onClose: vi.fn(),
+      onRefreshCatalog: vi.fn(),
       onSubmit: vi.fn(),
+      onOperationRecorded: vi.fn(),
+      onReceiptRecorded: vi.fn(),
     };
     render(
       <TestContentProvider>
@@ -162,13 +404,16 @@ describe('OperationDialog', () => {
     expect(screen.getByLabelText('Reference note')).toHaveValue('count correction');
     await user.click(screen.getByRole('button', { name: 'Adjust stock' }));
 
-    expect(props.onSubmit).toHaveBeenCalledWith({
-      type: 'adjust',
-      locationId: 'loc-central',
-      skuId: 'sku-coffee',
-      delta: -1,
-      note: 'count correction',
-    } satisfies StockOperation);
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      {
+        type: 'adjust',
+        locationId: 'loc-central',
+        skuId: 'sku-coffee',
+        delta: -1,
+        note: 'count correction',
+      } satisfies StockOperation,
+      writeOptions,
+    );
     await user.keyboard('{Escape}');
     expect(props.onClose).toHaveBeenCalledOnce();
     opener.remove();
@@ -190,9 +435,12 @@ describe('OperationDialog', () => {
 
   it('shows operation errors and prevents a transfer to the source location', async () => {
     const user = userEvent.setup();
-    renderDialog('transfer', { error: 'There is not enough available stock' });
+    renderDialog('transfer', {
+      onSubmit: vi.fn().mockRejectedValue(new ApiClientError('Stock depleted', 'STOCK_INSUFFICIENT', undefined, 409)),
+    });
 
-    expect(screen.getByRole('alert')).toHaveTextContent('There is not enough available stock');
+    await user.click(screen.getByRole('button', { name: 'Create transfer' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('There is not enough available stock');
     await user.selectOptions(screen.getByLabelText('From location'), 'loc-north');
     expect(screen.getByLabelText('To location')).toHaveValue('loc-central');
   });
@@ -210,7 +458,9 @@ describe('OperationDialog', () => {
     const last = focusable.item(focusable.length - 1);
     if (!first || !last) throw new Error('The operation dialog must have focusable controls');
 
-    last.focus();
+    expect(dialog).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(last).toHaveFocus();
     fireEvent.keyDown(last, { key: 'Tab' });
     expect(first).toHaveFocus();
     first.focus();
